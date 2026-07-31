@@ -477,8 +477,11 @@ def _populate_face_face_connectivity(grid):
     """Constructs the UGRID connectivity variable (``face_face_connectivity``)
     and stores it within the internal (``Grid._ds``) and through the attribute
     (``Grid.face_face_connectivity``)."""
+    # ``.data`` rather than ``.values``: the latter computes a dask-backed
+    # variable in full, which is the one allocation this routine is trying to
+    # avoid. ``_build_face_face_connectivity`` consumes either kind.
     face_face = _build_face_face_connectivity(
-        grid.edge_face_connectivity.values, grid.n_face, grid.n_max_face_nodes
+        grid.edge_face_connectivity.data, grid.n_face, grid.n_max_face_nodes
     )
 
     grid._ds["face_face_connectivity"] = xr.DataArray(
@@ -488,23 +491,143 @@ def _populate_face_face_connectivity(grid):
     )
 
 
-@njit(cache=True)
 def _build_face_face_connectivity(edge_face_connectivity, n_face, n_max_face_nodes):
-    face_face_connectivity = np.full(
-        (n_face, n_max_face_nodes), INT_FILL_VALUE, INT_DTYPE
+    """Constructs the ``face_face_connectivity`` variable, which represents the
+    indices of the faces that neighbour each face.
+
+    Mirrors the backing of ``edge_face_connectivity``: a dask input yields a dask
+    output, so a grid that was chunked stays chunked through the connectivity
+    chain rather than silently reverting to NumPy, and a NumPy input yields
+    NumPy exactly as before.
+
+    Each edge is scattered into the output independently, so the input is
+    consumed a block at a time. The output is indexed by face rather than by
+    edge, and the scatter has no locality to exploit, so an output block can
+    only be produced by passing over the whole input -- output blocks are
+    therefore independent of one another, and run concurrently.
+    """
+    import dask.array as da
+
+    if not isinstance(edge_face_connectivity, da.Array):
+        return _build_face_face_block(
+            edge_face_connectivity, n_max_face_nodes, 0, n_face
+        )
+
+    import dask
+
+    # Sized by dask's own ``array.chunk-size`` budget, and left whole along the
+    # neighbour axis, which is only ``n_max_face_nodes`` wide.
+    face_chunks, _ = da.core.normalize_chunks(
+        ("auto", -1), shape=(n_face, n_max_face_nodes), dtype=INT_DTYPE
     )
-    face_index_position = np.zeros(n_face, dtype=INT_DTYPE)
 
-    for edge_faces in edge_face_connectivity:
-        face_a, face_b = edge_faces
+    # One graph node per input block. Calling ``.compute()`` per block from
+    # inside a task instead re-enters the scheduler each time, which measured as
+    # ~97% of the runtime and serialised everything behind those nested calls.
+    edge_face_blocks = list(edge_face_connectivity.to_delayed().ravel())
+
+    blocks = []
+    face_start = 0
+    for face_chunk in face_chunks:
+        face_stop = face_start + face_chunk
+        # A linear fold: each accumulator has exactly one consumer, so
+        # accumulating in place is safe, and only one input block per output
+        # block is live at a time.
+        accumulator = dask.delayed(_new_face_face_accumulator, pure=False)(
+            face_chunk, n_max_face_nodes
+        )
+        for edge_face_block in edge_face_blocks:
+            accumulator = dask.delayed(_accumulate_face_face_block, pure=False)(
+                accumulator, edge_face_block, face_start, face_stop
+            )
+        blocks.append(
+            da.from_delayed(
+                dask.delayed(_face_face_result, pure=False)(accumulator),
+                shape=(face_chunk, n_max_face_nodes),
+                dtype=INT_DTYPE,
+            )
+        )
+        face_start = face_stop
+
+    if len(blocks) == 1:
+        # ``concatenate`` would hold both its inputs and its result, costing a
+        # second copy of the output for no reason when there is one block.
+        return blocks[0]
+
+    return da.concatenate(blocks, axis=0)
+
+
+def _new_face_face_accumulator(n_rows, n_max_face_nodes):
+    """Allocates the output rows for one face block, plus their fill counters."""
+    return (
+        np.full((n_rows, n_max_face_nodes), INT_FILL_VALUE, INT_DTYPE),
+        np.zeros(n_rows, dtype=INT_DTYPE),
+    )
+
+
+def _accumulate_face_face_block(accumulator, edge_face_block, face_start, face_stop):
+    """Folds one block of ``edge_face_connectivity`` into an accumulator."""
+    face_face_connectivity, face_index_position = accumulator
+    _accumulate_face_face_connectivity(
+        # Free when the block already is contiguous, and keeps the kernel to a
+        # single compiled signature when it is not.
+        np.ascontiguousarray(edge_face_block),
+        face_face_connectivity,
+        face_index_position,
+        face_start,
+        face_stop,
+    )
+    return accumulator
+
+
+def _face_face_result(accumulator):
+    """Drops the fill counters, leaving the output rows."""
+    return accumulator[0]
+
+
+def _build_face_face_block(
+    edge_face_connectivity, n_max_face_nodes, face_start, face_stop
+):
+    """Builds the rows of ``face_face_connectivity`` for faces
+    ``[face_start, face_stop)`` from a single concrete array."""
+    accumulator = _new_face_face_accumulator(
+        face_stop - face_start, n_max_face_nodes
+    )
+    _accumulate_face_face_block(
+        accumulator, edge_face_connectivity, face_start, face_stop
+    )
+    return _face_face_result(accumulator)
+
+
+# ``nogil`` so that output blocks genuinely run concurrently: each one owns its
+# accumulator arrays and only reads the shared input, so there is nothing to
+# race on. Holding the GIL here pinned the threaded scheduler to ~1.0x no matter
+# how many workers it was given.
+@njit(cache=True, nogil=True)
+def _accumulate_face_face_connectivity(
+    edge_face_block, face_face_connectivity, face_index_position, face_start, face_stop
+):
+    """Scatters one block of ``edge_face_connectivity`` into the rows of the
+    output covering ``[face_start, face_stop)``.
+
+    ``njit`` sits at this level, rather than around the whole build, so that it
+    only ever sees a single concrete block -- nopython mode cannot consume a
+    dask array, and wrapping the outer loop would force the caller to
+    materialize the entire input to satisfy it.
+    """
+    for i in range(edge_face_block.shape[0]):
+        face_a = edge_face_block[i, 0]
+        face_b = edge_face_block[i, 1]
         if face_a != INT_FILL_VALUE and face_b != INT_FILL_VALUE:
-            face_face_connectivity[face_a, face_index_position[face_a]] = face_b
-            face_index_position[face_a] += 1
+            if face_start <= face_a < face_stop:
+                row = face_a - face_start
+                face_face_connectivity[row, face_index_position[row]] = face_b
+                face_index_position[row] += 1
 
-            face_face_connectivity[face_b, face_index_position[face_b]] = face_a
-            face_index_position[face_b] += 1
-
-    return face_face_connectivity
+            if face_start <= face_b < face_stop:
+                row = face_b - face_start
+                face_face_connectivity[row, face_index_position[row]] = face_a
+                face_index_position[row] += 1
 
 
 def _populate_node_edge_connectivity(grid):

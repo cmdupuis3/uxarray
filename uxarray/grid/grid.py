@@ -1267,8 +1267,7 @@ class Grid:
         Connectivity variable representing the indices of nodes (mesh vertices) that define each edge.
 
         Each row (i.e., each edge) contains exactly two node indices that define the start and end points of the edge.
-        Constructed edges are stored as ascending node pairs and numbered in lexicographic order of that pair; edges
-        read from a file keep the order and orientation they were stored in.
+        The nodes are stored in an arbitrary order.
 
         Returns
         -------

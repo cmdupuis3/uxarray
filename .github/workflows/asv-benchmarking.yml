@@ -9,6 +9,9 @@ on:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
+    # Without this the platform's 6h cap is the only limit, which is how a
+    # mis-skipped range quietly turns into a 453-commit build.
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash -el {0}
@@ -105,7 +108,11 @@ jobs:
           fi
           cd benchmarks
           asv machine --machine GH-Actions --os ubuntu-latest --arch x64 --cpu "2-core unknown" --ram 7GB
-          asv run v2024.02.0..main --skip-existing --parallel || true
+          # ``--skip-existing-commits``, not ``--skip-existing``: the latter keys
+          # its skip set by (commit, env), so asv's per-commit check never
+          # matches and it builds and installs every commit in the range before
+          # skipping the benchmarks it already has.
+          asv run v2024.02.0..main --skip-existing-commits --parallel || true
 
       - name: Commit and push benchmark results
         run: |

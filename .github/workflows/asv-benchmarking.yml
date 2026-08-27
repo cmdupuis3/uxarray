@@ -95,8 +95,14 @@ jobs:
         shell: bash -l {0}
         id: benchmark
         run: |
-          # Fill the fixture cache before asv preimports the suite, which would otherwise build it serially in the forkserver parent
-          python -m benchmarks.helpers._fixtures
+          # Fill the fixture cache before asv preimports the suite, which would
+          # otherwise build it serially in the forkserver parent. Guarded because
+          # this workflow checks out main whatever ref it was dispatched from
+          if [ -f benchmarks/helpers/_fixtures.py ]; then
+            python -m benchmarks.helpers._fixtures
+          else
+            echo "no benchmarks/helpers/_fixtures.py on this ref; nothing to prime"
+          fi
           cd benchmarks
           asv machine --machine GH-Actions --os ubuntu-latest --arch x64 --cpu "2-core unknown" --ram 7GB
           asv run v2024.02.0..main --skip-existing --parallel || true

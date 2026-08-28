@@ -26,6 +26,7 @@ Usage::
 
 import argparse
 import json
+import platform
 import sys
 from pathlib import Path
 
@@ -39,34 +40,38 @@ def default_path():
     return Path.home() / ".asv-machine.json"
 
 
-def pin(name, path=None):
+def pin(name, path=None, hostname=None):
     """Renames the machine file's freshly detected entry to ``name``.
 
     Returns its details. Entries for other machines are left alone -- a runner
-    has only the one, but a laptop that has recorded a couple should not lose
-    them to a benchmark run.
+    has only the one, but a login node that has recorded every compute node it
+    ever landed on should not lose them to a benchmark run.
 
-    Raises if there is more than one entry and none is ``name`` already: with
-    several to choose from there is no telling which describes the machine this
-    is running on, and picking wrong would label the results with another
-    machine's hardware.
+    The fresh entry is the one keyed by this host's name, since that is what
+    ``asv machine --yes`` writes (``Machine.get_defaults`` takes it from
+    ``platform.uname``). Renaming it is the whole point: several nodes of one
+    cluster should file their results under one machine, or a sharded run has
+    nothing to merge. Falls back to a lone entry whatever its name, for a runner
+    whose hostname has already been renamed away by an earlier call.
     """
     path = Path(path) if path is not None else default_path()
+    hostname = hostname if hostname is not None else platform.node()
     stored = json.loads(path.read_text())
     version = stored.pop(_VERSION_KEY, None)
 
-    if name in stored:
+    if hostname in stored:
+        detected = stored.pop(hostname)
+    elif name in stored:
         detected = stored[name]
     elif len(stored) == 1:
-        # Rename it: the old key was the hostname, which is what we are here to
-        # stop the results being filed under.
-        (old_name,) = stored
-        detected = stored.pop(old_name)
+        (only,) = stored
+        detected = stored.pop(only)
     else:
         raise ValueError(
-            f"{path} holds {len(stored)} machines ({', '.join(sorted(stored))}) and none "
-            f"is {name!r}; cannot tell which describes this machine. Pass --name "
-            f"one of them, or delete the file and let ``asv machine --yes`` rebuild it"
+            f"{path} holds {len(stored)} machines ({', '.join(sorted(stored))}), none of "
+            f"them this host ({hostname!r}) and none of them {name!r}; cannot tell which "
+            f"describes the machine this is running on. Run ``asv machine --yes`` first, "
+            f"or pass --name one of the recorded machines"
         )
 
     detected["machine"] = name
@@ -84,9 +89,12 @@ def main(argv=None):
     )
     parser.add_argument("--name", required=True, help="Machine name to pin to.")
     parser.add_argument("--path", default=None, help="Machine file (default ~/.asv-machine.json).")
+    parser.add_argument(
+        "--hostname", default=None, help="Host whose entry to rename (default this one)."
+    )
     args = parser.parse_args(argv)
 
-    detected = pin(args.name, args.path)
+    detected = pin(args.name, args.path, args.hostname)
     print(
         f"{args.name}: {detected.get('cpu', '?')} "
         f"({detected.get('num_cpu', '?')} cpu, {detected.get('os', '?')})"

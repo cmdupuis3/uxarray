@@ -33,9 +33,12 @@ STAGE_SCRIPT="$REPO/benchmarks/hpc/stage.pbs"
 LOGS="${LOGS:-$REPO/benchmarks/hpc/logs}"
 mkdir -p "$LOGS"
 
-# NCPUS is what PBS sets for the resources this session actually holds; nproc
-# would count the whole node even where the job was given a slice of it.
-CORES="${NCPUS:-$(nproc)}"
+# ``nproc`` rather than PBS's NCPUS, which is the ncpus *requested per chunk* --
+# 1 for a plain ``qsub -I`` -- and says nothing about what the node will let this
+# session use. ``nproc`` reports the CPUs actually available to this process,
+# honouring any affinity mask or cpuset the job was given. Override with CORES
+# to hold the run to fewer.
+CORES="${CORES:-$(nproc)}"
 PER=$((CORES / SHARDS))
 if [ "$PER" -lt "$((THREADS + 1))" ]; then
     echo "warning: $CORES cores over $SHARDS shards is $PER each, under the" >&2

@@ -26,7 +26,9 @@ Usage::
 
 import argparse
 import json
+import os
 import platform
+import re
 import sys
 from pathlib import Path
 
@@ -35,12 +37,34 @@ __all__ = ["pin"]
 _VERSION_KEY = "version"
 
 
+def default_name():
+    """A machine name that survives landing on a different node next time.
+
+    The scheduler puts you on ``derecho3`` one day and ``crhtc70`` the next, and
+    asv keys results on ``platform.uname``'s node name, so left alone it records
+    a new machine every login and the results scatter across all of them.
+
+    ``NCAR_HOST`` is the reliable answer where it is set -- it names the cluster
+    rather than the node, which is the granularity results want. Failing that,
+    the node name with its trailing digits removed, which folds ``derecho3`` and
+    ``derecho5`` together but *not* ``derecho3`` and ``crhtc70``: login and
+    compute nodes of one cluster do not share a stem. Set ``ASV_MACHINE``
+    yourself if you move between them without ``NCAR_HOST``.
+    """
+    for variable in ("ASV_MACHINE", "NCAR_HOST"):
+        value = os.environ.get(variable)
+        if value:
+            return value, variable
+    node = platform.node().split(".")[0]
+    return re.sub(r"[-_]?\d+$", "", node) or node, None
+
+
 def default_path():
     """Where asv keeps its machine file (``MachineCollection.get_machine_file_path``)."""
     return Path.home() / ".asv-machine.json"
 
 
-def pin(name, path=None, hostname=None):
+def pin(name, path=None, hostname=None, sole=False):
     """Renames the machine file's freshly detected entry to ``name``.
 
     Returns its details. Entries for other machines are left alone -- a runner
@@ -75,6 +99,8 @@ def pin(name, path=None, hostname=None):
         )
 
     detected["machine"] = name
+    if sole:
+        stored = {}
     stored[name] = detected
     if version is not None:
         stored[_VERSION_KEY] = version
@@ -87,18 +113,52 @@ def main(argv=None):
         prog="python -m benchmarks.helpers._machine",
         description="Rename asv's detected machine entry to a fixed name.",
     )
-    parser.add_argument("--name", required=True, help="Machine name to pin to.")
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Machine name to pin to. Defaults to $ASV_MACHINE, then $NCAR_HOST, "
+        "then this host's name with trailing digits removed.",
+    )
     parser.add_argument("--path", default=None, help="Machine file (default ~/.asv-machine.json).")
     parser.add_argument(
         "--hostname", default=None, help="Host whose entry to rename (default this one)."
     )
+    parser.add_argument(
+        "--sole",
+        action="store_true",
+        help="Drop every other machine from the file. asv falls back to a lone entry "
+        "whatever the hostname, so this makes bare ``asv run``/``asv show`` work from "
+        "any node without -m. Use it where you only ever benchmark one machine.",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Print only the pinned name, for capturing."
+    )
+    parser.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="Print the name that would be pinned and change nothing.",
+    )
     args = parser.parse_args(argv)
 
-    detected = pin(args.name, args.path, args.hostname)
+    name, source = (args.name, "--name") if args.name else default_name()
+    if args.print_only:
+        print(name)
+        return 0
+    detected = pin(name, args.path, args.hostname, sole=args.sole)
+    if args.quiet:
+        print(name)
+        return 0
     print(
-        f"{args.name}: {detected.get('cpu', '?')} "
+        f"{name}: {detected.get('cpu', '?')} "
         f"({detected.get('num_cpu', '?')} cpu, {detected.get('os', '?')})"
     )
+    if source is None:
+        print(
+            f"  note: {name!r} came from this host's name. A cluster's login and compute "
+            f"nodes do not share a stem, so set ASV_MACHINE (or rely on NCAR_HOST) if you "
+            f"benchmark from both, or the results will still split in two.",
+        )
     return 0
 
 

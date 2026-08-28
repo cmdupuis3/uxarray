@@ -26,7 +26,9 @@ THREADS="${THREADS:-8}"
 export REPO SHARDS THREADS
 export REV="${REV:-HEAD^!}"
 export CONFIG="${CONFIG:-asv.conf.hpc.json}"
-export ASV_MACHINE="${ASV_MACHINE:-derecho}"
+# Left empty on purpose: stage.pbs derives it, so this works unchanged on
+# derecho and casper both.
+export ASV_MACHINE="${ASV_MACHINE:-}"
 export ASV_ACTIVATE="${ASV_ACTIVATE:-true}"
 
 STAGE_SCRIPT="$REPO/benchmarks/hpc/stage.pbs"

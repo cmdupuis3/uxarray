@@ -35,7 +35,8 @@ SHARDS="${SHARDS:-4}"
 REV="${REV:-HEAD^!}"
 QUEUE="${QUEUE:-main}"
 CONFIG="${CONFIG:-asv.conf.hpc.json}"
-ASV_MACHINE="${ASV_MACHINE:-derecho}"
+# Empty means stage.pbs derives it from NCAR_HOST or the node name.
+ASV_MACHINE="${ASV_MACHINE:-}"
 WALLTIME="${WALLTIME:-12:00:00}"
 SETUP_WALLTIME="${SETUP_WALLTIME:-02:00:00}"
 # Off /glade/derecho/scratch so every shard shares one fixture cache. The

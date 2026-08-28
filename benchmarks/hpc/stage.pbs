@@ -17,8 +17,10 @@ REPO="${REPO:?REPO must be the repository root}"
 CONFIG="${CONFIG:-asv.conf.hpc.json}"
 # One name for every shard: asv files results under
 # ``results/<machine>/<commit>-<env>.json``, so shards that disagree leave
-# nothing for the merge to line up.
-ASV_MACHINE="${ASV_MACHINE:-derecho}"
+# nothing for the merge to line up. Derived rather than assumed, because the
+# scheduler hands you a different node each login and asv would otherwise
+# record each one as a machine of its own -- see ``_machine.default_name``.
+ASV_MACHINE="${ASV_MACHINE:-$(cd "$REPO" && python -m benchmarks.helpers._machine --print)}"
 # Shared, so the shards read the dyamond grids off campaign storage once
 # between them rather than once each; the setup stage fills it. Optional,
 # because running the stages locally has nothing to share and

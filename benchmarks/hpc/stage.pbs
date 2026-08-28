@@ -46,7 +46,13 @@ setup)
     # NUMBA_NUM_THREADS environments share one build directory -- ``env_nobuild``
     # variables are omitted from the name ``dir_name`` hashes -- so this one
     # build serves all of them.
-    asv run --bench just-discover "$REV"
+    # ``-m`` on every asv call from here on. The pin above renamed this host's
+    # entry to $ASV_MACHINE, so the hostname asv would otherwise look itself up
+    # under no longer exists in the machine file -- and once that file holds
+    # more than one machine, asv's fall-back to a lone entry does not apply
+    # either. Without it this fails with "No information stored about machine
+    # '<hostname>'" immediately after the pin reports success.
+    asv run --bench just-discover -m "$ASV_MACHINE" "$REV"
     PYTHONPATH=.. python -m benchmarks.helpers._partition --shards "$SHARDS"
     ;;
 shard)

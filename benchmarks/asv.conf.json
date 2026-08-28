@@ -122,12 +122,27 @@
         // Belt to that brace: if TBB is ever unavailable, pick the other
         // fork-safe layer rather than quietly falling back to the one that
         // breaks. ``forksafe`` raises if no fork-safe layer exists at all.
-        "env_nobuild": {"NUMBA_THREADING_LAYER": ["forksafe"]}
+        //
+        // The BLAS variables are pinned so numpy cannot take the runner's four
+        // vCPUs out from under whatever is being measured. Unpinned it competes
+        // with numba for the same cores, which shows up as run-to-run spread in
+        // every benchmark that touches an array, not just the threaded ones.
+        // ``NUMBA_NUM_THREADS`` is deliberately left alone: numba's default is
+        // the whole machine, and with BLAS out of the way that is now an
+        // unambiguous four rather than four contended with numpy's.
+        "env_nobuild": {
+            "NUMBA_THREADING_LAYER": ["forksafe"],
+            "OMP_NUM_THREADS": ["1"],
+            "MKL_NUM_THREADS": ["1"],
+            "OPENBLAS_NUM_THREADS": ["1"]
+        }
     },
 
 
+    // Just the one command: ``python -m build`` put an sdist and a wheel in
+    // {build_dir}/dist, which asv never reads, and then this rebuilt the wheel
+    // into the directory asv actually installs from.
     "build_command": [
-        "python -m build",
         "python -mpip wheel --no-deps --no-build-isolation --no-index -w {build_cache_dir} {build_dir}"
     ],
 

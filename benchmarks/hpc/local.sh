@@ -30,17 +30,34 @@ export CONFIG="${CONFIG:-asv.conf.hpc.json}"
 # derecho and casper both.
 export ASV_MACHINE="${ASV_MACHINE:-}"
 export ASV_ACTIVATE="${ASV_ACTIVATE:-true}"
+# Also evaluated here, not just in the stages, so the core count below can be
+# read with python rather than with a shell tool that lies about it.
+eval "$ASV_ACTIVATE"
 
 STAGE_SCRIPT="$REPO/benchmarks/hpc/stage.pbs"
 LOGS="${LOGS:-$REPO/benchmarks/hpc/logs}"
 mkdir -p "$LOGS"
 
-# ``nproc`` rather than PBS's NCPUS, which is the ncpus *requested per chunk* --
-# 1 for a plain ``qsub -I`` -- and says nothing about what the node will let this
-# session use. ``nproc`` reports the CPUs actually available to this process,
-# honouring any affinity mask or cpuset the job was given. Override with CORES
-# to hold the run to fewer.
-CORES="${CORES:-$(nproc)}"
+# Neither PBS's NCPUS nor ``nproc`` can be trusted for this. NCPUS is the ncpus
+# *requested per chunk*, 1 for a plain ``qsub -I``, and says nothing about the
+# node. And GNU ``nproc`` honours OMP_NUM_THREADS and OMP_THREAD_LIMIT, so in a
+# session that sets either it reports the OpenMP thread limit -- 1, or 2 -- and
+# not the machine's cores at all.
+#
+# The affinity mask is the real answer: the CPUs this process may actually run
+# on. It respects a cpuset the scheduler imposed and ignores OpenMP entirely.
+# Override with CORES to hold the run to fewer than the mask allows.
+CORES="${CORES:-$(python -c '
+import os
+try:
+    print(len(os.sched_getaffinity(0)))
+except AttributeError:   # not Linux
+    print(os.cpu_count() or 1)
+')}"
+if ! [ "$CORES" -ge 1 ] 2>/dev/null; then
+    echo "could not work out a core count (got ${CORES:-empty}); set CORES" >&2
+    exit 1
+fi
 PER=$((CORES / SHARDS))
 if [ "$PER" -lt "$((THREADS + 1))" ]; then
     echo "warning: $CORES cores over $SHARDS shards is $PER each, under the" >&2

@@ -112,7 +112,7 @@ jobs:
           # its skip set by (commit, env), so asv's per-commit check never
           # matches and it builds and installs every commit in the range before
           # skipping the benchmarks it already has.
-          asv run v2024.02.0..main --skip-existing-commits --parallel || true
+          asv run main^! --skip-existing-commits --parallel || true
 
       - name: Commit and push benchmark results
         run: |

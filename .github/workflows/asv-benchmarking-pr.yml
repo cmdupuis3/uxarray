@@ -12,6 +12,14 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: >-
+          Branch, tag or commit to benchmark against. The comparison is against
+          its merge-base with the dispatched ref, so a topic branch should name
+          the branch it will merge into rather than main.
+        required: false
+        default: main
 
 env:
   PR_HEAD_LABEL: ${{ github.event.pull_request.head.label }}
@@ -82,11 +90,12 @@ jobs:
           BASE="${{ github.event.pull_request.base.sha }}"
           LABEL="${PR_HEAD_LABEL:-$GITHUB_REF_NAME}"
           if [ -z "$BASE" ]; then
-            # The merge-base rather than main's tip: a manual run benchmarks the
-            # branch as it stands, without main's later commits merged in, so
-            # comparing against main's tip would charge this branch for them.
-            git rev-parse --verify -q origin/main >/dev/null || git fetch -q origin main:refs/remotes/origin/main
-            BASE=$(git merge-base "$GITHUB_SHA" origin/main)
+            # The merge-base rather than the base branch's tip
+            BASE_REF="${{ github.event.inputs.base_ref }}"
+            BASE_REF="${BASE_REF:-main}"
+            git rev-parse --verify -q "origin/$BASE_REF" >/dev/null \
+              || git fetch -q origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
+            BASE=$(git merge-base "$GITHUB_SHA" "origin/$BASE_REF")
           fi
           if [ "$BASE" = "$(git rev-parse "$GITHUB_SHA")" ]; then
             # Dispatched from main itself: compare it against the commit before.

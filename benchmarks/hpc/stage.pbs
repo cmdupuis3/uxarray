@@ -1,0 +1,82 @@
+#!/bin/bash
+# One script, three stages of a sharded asv run. Submitted by ``submit.sh``,
+# which sets STAGE and the rest of the environment; not meant to be qsub'd by
+# hand. Defaults here are only so a stage is runnable outside PBS for debugging.
+#
+#PBS -N asv
+#PBS -j oe
+#PBS -l select=1:ncpus=128
+#PBS -l walltime=12:00:00
+
+set -euo pipefail
+
+STAGE="${STAGE:?STAGE must be setup, shard or merge}"
+SHARDS="${SHARDS:-4}"
+REV="${REV:-HEAD^!}"
+REPO="${REPO:?REPO must be the repository root}"
+CONFIG="${CONFIG:-asv.conf.hpc.json}"
+# One name for every shard: asv files results under
+# ``results/<machine>/<commit>-<env>.json``, so shards that disagree leave
+# nothing for the merge to line up.
+ASV_MACHINE="${ASV_MACHINE:-derecho}"
+# Shared, so the shards read the dyamond grids off campaign storage once
+# between them rather than once each; the setup stage fills it. Optional,
+# because running the stages locally has nothing to share and
+# ``_fixtures.cache_dir`` already defaults to the checkout.
+if [ -n "${UXARRAY_BENCH_CACHE_DIR:-}" ]; then
+    export UXARRAY_BENCH_CACHE_DIR
+fi
+
+eval "${ASV_ACTIVATE:-true}"
+cd "$REPO/benchmarks"
+
+case "$STAGE" in
+setup)
+    # Everything that must happen exactly once, because every shard shares the
+    # filesystem it happens on: the fixture cache, the machine file, and the
+    # asv environments plus the wheel. Four shards building into one
+    # ``env/<hash>`` concurrently is the race this stage exists to prevent.
+    (cd .. && python -m benchmarks.helpers._fixtures)
+    asv machine --yes
+    (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
+    # asv's own discovery-only mode: creates the environments, builds the
+    # project, writes results/benchmarks.json, runs no benchmark. The four
+    # NUMBA_NUM_THREADS environments share one build directory -- ``env_nobuild``
+    # variables are omitted from the name ``dir_name`` hashes -- so this one
+    # build serves all of them.
+    asv run --bench just-discover "$REV"
+    PYTHONPATH=.. python -m benchmarks.helpers._partition --shards "$SHARDS"
+    ;;
+shard)
+    SHARD="${PBS_ARRAY_INDEX:-${SHARD:?}}"
+    # ``--asv-args`` writes this shard's config -- a results_dir of its own,
+    # plus any --env override -- and prints it with the --bench patterns.
+    # THREADS is optional: unset, the config's own NUMBA_NUM_THREADS stands.
+    # Set, it overrides it, and lands in the environment name, so a run at one
+    # thread count files its results separately from a run at another.
+    THREAD_ARG=""
+    if [ -n "${THREADS:-}" ]; then
+        THREAD_ARG="--env NUMBA_NUM_THREADS=$THREADS"
+    fi
+    ASV_ARGS=$(PYTHONPATH=.. python -m benchmarks.helpers._partition \
+        --shards "$SHARDS" --shard "$SHARD" --config "$CONFIG" $THREAD_ARG --asv-args)
+    status=0
+    asv run --show-stderr -m "$ASV_MACHINE" $ASV_ARGS "$REV" || status=$?
+    # 2 is "a benchmark failed", not "the shard broke": its other results are
+    # complete and the merge should still get them. Anything else is real.
+    if [ "$status" -eq 2 ]; then
+        echo "asv exited 2: some benchmarks failed, see above" >&2
+    elif [ "$status" -ne 0 ]; then
+        exit "$status"
+    fi
+    ;;
+merge)
+    (cd .. && python -m benchmarks.helpers._merge \
+        --out benchmarks/results benchmarks/results.shard*)
+    asv show -m "$ASV_MACHINE" || true
+    ;;
+*)
+    echo "unknown STAGE $STAGE" >&2
+    exit 2
+    ;;
+esac

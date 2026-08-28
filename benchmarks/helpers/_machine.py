@@ -40,12 +40,16 @@ def default_path():
 
 
 def pin(name, path=None):
-    """Renames the machine file's single entry to ``name``. Returns its details.
+    """Renames the machine file's freshly detected entry to ``name``.
 
-    Raises if there is more than one entry and none of them is ``name`` already:
-    with several to choose from there is no way to tell which one describes the
-    machine this is running on, and picking wrong would label the results with
-    another machine's hardware.
+    Returns its details. Entries for other machines are left alone -- a runner
+    has only the one, but a laptop that has recorded a couple should not lose
+    them to a benchmark run.
+
+    Raises if there is more than one entry and none is ``name`` already: with
+    several to choose from there is no telling which describes the machine this
+    is running on, and picking wrong would label the results with another
+    machine's hardware.
     """
     path = Path(path) if path is not None else default_path()
     stored = json.loads(path.read_text())
@@ -54,18 +58,22 @@ def pin(name, path=None):
     if name in stored:
         detected = stored[name]
     elif len(stored) == 1:
-        (detected,) = stored.values()
+        # Rename it: the old key was the hostname, which is what we are here to
+        # stop the results being filed under.
+        (old_name,) = stored
+        detected = stored.pop(old_name)
     else:
         raise ValueError(
             f"{path} holds {len(stored)} machines ({', '.join(sorted(stored))}) and none "
-            f"is {name!r}; cannot tell which describes this machine"
+            f"is {name!r}; cannot tell which describes this machine. Pass --name "
+            f"one of them, or delete the file and let ``asv machine --yes`` rebuild it"
         )
 
     detected["machine"] = name
-    merged = {name: detected}
+    stored[name] = detected
     if version is not None:
-        merged[_VERSION_KEY] = version
-    path.write_text(json.dumps(merged, indent=4))
+        stored[_VERSION_KEY] = version
+    path.write_text(json.dumps(stored, indent=4))
     return detected
 
 

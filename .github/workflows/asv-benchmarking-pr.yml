@@ -109,6 +109,32 @@ jobs:
           restore-keys: |
             asv-fixtures-${{ runner.os }}-
 
+      # ``_partition`` weights each benchmark by the duration asv recorded for
+      # it, and falls back to the median of the ones it knows when it knows
+      # none -- which, with no results on a fresh runner, is every one of them,
+      # making the split by count. Restoring the last run's tree is what turns
+      # the packing back into a cost-balanced one. Restore-only here; the merge
+      # job saves the updated tree under a key of its own.
+      # The environment cache key has no commit in it -- deliberately, since the
+      # conda environment does not depend on one -- so on a hit ``actions/cache``
+      # saves nothing at the end of the job and the wheels built above would go
+      # with it, leaving every shard to build both commits again. The wheels get
+      # their own cache, keyed on the pair, and it is a couple of MB against the
+      # environment's 568, so keying it per run costs the cache budget little.
+      - name: Cache the built wheels
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ASV_DIR }}/env/*/asv-build-cache
+          key: asv-wheels-${{ runner.os }}-${{ steps.base.outputs.sha }}-${{ github.sha }}
+
+      - name: Restore recorded durations
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.ASV_DIR }}/results
+          key: asv-results-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            asv-results-${{ runner.os }}-
+
       - name: Pre-build and discover
         shell: bash -l {0}
         working-directory: ${{ env.ASV_DIR }}
@@ -147,11 +173,14 @@ jobs:
           python -c "import json, os; print('shards=' + json.dumps(list(range(int(os.environ['SHARDS'])))))" \
             >> "$GITHUB_OUTPUT"
 
+      # The whole tree rather than ``benchmarks.json`` alone: the shards
+      # partition from this, and a partition is only reproducible if they weigh
+      # the same durations setup weighed.
       - name: Upload the discovered suite
         uses: actions/upload-artifact@v7
         with:
           name: asv-plan
-          path: ${{ env.ASV_DIR }}/results/benchmarks.json
+          path: ${{ env.ASV_DIR }}/results
 
   benchmark:
     name: Shard ${{ matrix.shard }}
@@ -198,6 +227,18 @@ jobs:
           restore-keys: |
             asv-fixtures-${{ runner.os }}-
 
+      # The environment cache key has no commit in it -- deliberately, since the
+      # conda environment does not depend on one -- so on a hit ``actions/cache``
+      # saves nothing at the end of the job and the wheels built above would go
+      # with it, leaving every shard to build both commits again. The wheels get
+      # their own cache, keyed on the pair, and it is a couple of MB against the
+      # environment's 568, so keying it per run costs the cache budget little.
+      - name: Cache the built wheels
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ASV_DIR }}/env/*/asv-build-cache
+          key: asv-wheels-${{ runner.os }}-${{ needs.setup.outputs.base }}-${{ github.sha }}
+
       - name: Download the discovered suite
         uses: actions/download-artifact@v8
         with:
@@ -225,8 +266,21 @@ jobs:
             --config asv.conf.json --asv-args)
           echo "Baseline:  $BASE"
           echo "Contender: ${GITHUB_SHA} (${PR_HEAD_LABEL:-$GITHUB_REF_NAME})"
+          # asv returns 2 when a benchmark failed rather than when the run
+          # broke (``commands/run.py``: ``if failures: return 2``), and this
+          # shard's other results are complete and worth merging. The old
+          # single-job workflow tolerated it by accident -- ``asv compare`` ran
+          # last in the same step and its status was the step's -- so make it
+          # deliberate here, loudly, rather than letting one long-broken
+          # benchmark redden every shard that happens to hold it.
+          status=0
           asv continuous --split --show-stderr -m "$ASV_MACHINE" $ASV_ARGS \
-            "$BASE" "${GITHUB_SHA}"
+            "$BASE" "${GITHUB_SHA}" || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::warning title=Benchmark failures in shard ${SHARD}::asv exited 2; see the failed entries above"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
 
       - name: Upload shard results
         if: always()
@@ -320,6 +374,15 @@ jobs:
               for duration, name in reversed(rows[-15:]):
                   print(f"  {duration:8.1f}s  {100 * duration / total:5.1f}%  {name}")
           PY
+
+      # Keyed on the run id so every run stores its own entry and setup's
+      # prefixed restore picks up the newest; there is nothing to restore here.
+      - name: Save recorded durations for the next run
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.ASV_DIR }}/results
+          key: asv-results-${{ runner.os }}-${{ github.run_id }}
 
       - name: Save PR number
         if: always()

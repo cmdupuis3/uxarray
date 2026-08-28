@@ -60,9 +60,24 @@
         // its physical core count is the usual shape, and
         // ``python -m benchmarks.helpers._threads`` reports that count.
         // Values above the core count are allowed and simply oversubscribe.
+        // One value each: a matrix entry with several values is a separate
+        // environment per value, and asv runs the whole suite in every one of
+        // them. Only 24 of the 86 benchmarks reach a ``parallel=True`` kernel,
+        // so a four-value sweep ran the other 62 four times over to print the
+        // same number four times. ``NUMBA_NUM_THREADS`` is the one knob here;
+        // to sweep it, see ``--env`` in ``benchmarks/helpers/_partition.py``.
+        //
+        // The BLAS variables are pinned because they are what made the old
+        // sweep unreadable: numpy would take the whole node in every
+        // environment, so the ``NUMBA_NUM_THREADS=1`` column was never a
+        // single-threaded baseline and the scaling curve it implied was
+        // measuring contention. Pinned, numba's threads are the only ones.
         "env_nobuild": {
             "NUMBA_THREADING_LAYER": ["forksafe"],
-            "NUMBA_NUM_THREADS": ["1", "2", "4", "8"]
+            "NUMBA_NUM_THREADS": ["8"],
+            "OMP_NUM_THREADS": ["1"],
+            "MKL_NUM_THREADS": ["1"],
+            "OPENBLAS_NUM_THREADS": ["1"]
         }
     }
 }

@@ -43,6 +43,13 @@ Usage::
     python -m benchmarks.helpers._partition --shards 4
     asv run $(python -m benchmarks.helpers._partition --shards 4 --shard 0 \
         --config asv.conf.hpc.json --asv-args)
+
+    # A thread sweep, for whoever wants one. ``--shards 1`` is the whole suite;
+    # add ``--bench`` to hold it to the benchmarks that can actually respond.
+    for n in 1 2 4 8; do
+        asv run $(python -m benchmarks.helpers._partition --shards 1 --shard 0 \
+            --config asv.conf.hpc.json --env NUMBA_NUM_THREADS=$n --asv-args)
+    done
 """
 
 import argparse
@@ -227,8 +234,12 @@ def shard_results_dir(results_dir, shard):
     return f"{results_dir}.shard{shard}"
 
 
-def write_shard_config(base_config, out_path, shard):
+def write_shard_config(base_config, out_path, shard, env=None):
     """Writes a copy of ``base_config`` that writes results where ``shard`` should.
+
+    ``env`` overrides ``env_nobuild`` variables. An override lands in the
+    environment's name, so asv files those results under a name of their own and
+    a sweep's runs do not overwrite one another.
 
     Returns the shard's results directory.
     """
@@ -240,6 +251,11 @@ def write_shard_config(base_config, out_path, shard):
     config = util.load_json(str(base_config), js_comments=True)
     results_dir = shard_results_dir(config.get("results_dir", "results"), shard)
     config["results_dir"] = results_dir
+    if env:
+        matrix = config.setdefault("matrix", {}).setdefault("env_nobuild", {})
+        # One value per variable: a list of several is a separate environment
+        # per value, and asv would run the whole suite in each of them.
+        matrix.update({key: [value] for key, value in env.items()})
     with open(out_path, "w") as handle:
         json.dump(config, handle, indent=4)
     return results_dir
@@ -297,6 +313,15 @@ def main(argv=None):
         help="Where --asv-args writes the shard config (default: beside --config).",
     )
     parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override an env_nobuild variable in the generated config. Repeatable; "
+        "use it to sweep a variable the config pins to one value, e.g. "
+        "--env NUMBA_NUM_THREADS=4.",
+    )
+    parser.add_argument(
         "--asv-args",
         action="store_true",
         help="Write this shard's config and print every argument its asv run "
@@ -317,8 +342,14 @@ def main(argv=None):
             # told which benchmarks to run has to be told where to put them,
             # and splitting that across two commands is two chances to pass
             # one shard's benchmarks with another's results directory.
+            env = {}
+            for entry in args.env:
+                key, sep, value = entry.partition("=")
+                if not sep:
+                    parser.error(f"--env wants KEY=VALUE, got {entry!r}")
+                env[key] = value
             config_out = args.config_out or shard_config_path(args.config, args.shard)
-            write_shard_config(args.config, config_out, args.shard)
+            write_shard_config(args.config, config_out, args.shard, env)
             print("--config", config_out)
         for pattern in bench_regexes(shards[args.shard]):
             print("--bench", pattern)

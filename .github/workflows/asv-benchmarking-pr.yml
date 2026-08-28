@@ -20,24 +20,35 @@ on:
           the branch it will merge into rather than main.
         required: false
         default: main
+      shards:
+        description: >-
+          How many runners to spread the suite over. Each shard pays the conda
+          restore, the wheel install and the ~57s the suite's numba warmups
+          cost at import, so past about four the added runners mostly pay that
+          floor again.
+        required: false
+        default: "4"
 
 env:
   PR_HEAD_LABEL: ${{ github.event.pull_request.head.label }}
+  ASV_DIR: "./benchmarks"
+  CONDA_ENV_FILE: ci/environment.yml
+  # One machine name for every shard.
+  ASV_MACHINE: gh-linux-x64
 
 jobs:
-  benchmark:
+  setup:
+    name: Setup
     if: ${{ contains(github.event.pull_request.labels.*.name, 'run-benchmark') && github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
-    name: Linux
     runs-on: ubuntu-latest
-    env:
-      ASV_DIR: "./benchmarks"
-      CONDA_ENV_FILE: ci/environment.yml
-
+    outputs:
+      base: ${{ steps.base.outputs.sha }}
+      shards: ${{ steps.plan.outputs.shards }}
+      count: ${{ steps.plan.outputs.count }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
 
       - name: Record CPU topology
         # A diagnostic; never fail the job over it.
@@ -55,6 +66,29 @@ jobs:
             asv
             python-build
             mamba
+
+      - name: Resolve the baseline commit
+        id: base
+        # Only a pull_request event carries a pull_request payload, so on a
+        # manual run every one of these expressions is the empty string.
+        run: |
+          set -x
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE" ]; then
+            # The merge-base rather than the base branch's tip
+            BASE_REF="${{ github.event.inputs.base_ref }}"
+            BASE_REF="${BASE_REF:-main}"
+            git rev-parse --verify -q "origin/$BASE_REF" >/dev/null \
+              || git fetch -q origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
+            BASE=$(git merge-base "$GITHUB_SHA" "origin/$BASE_REF")
+          fi
+          if [ "$BASE" = "$(git rev-parse "$GITHUB_SHA")" ]; then
+            # Dispatched from main itself: compare it against the commit before.
+            BASE=$(git rev-parse "$GITHUB_SHA^")
+          fi
+          # Fail loudly rather than leaving asv to infer a baseline of its own.
+          test -n "$BASE" || { echo "could not determine a baseline commit" >&2; exit 1; }
+          echo "sha=$BASE" >> "$GITHUB_OUTPUT"
 
       # asv builds its own conda environment under ``benchmarks/env`
       - name: Cache asv's benchmark environment
@@ -75,75 +109,187 @@ jobs:
           restore-keys: |
             asv-fixtures-${{ runner.os }}-
 
-      - name: Run Benchmarks
+      - name: Pre-build and discover
         shell: bash -l {0}
-        id: benchmark
+        working-directory: ${{ env.ASV_DIR }}
         env:
-          ASV_MACHINE: gh-${{ runner.os }}-${{ runner.arch }}
-        # Only a pull_request event carries a pull_request payload, so on a
-        # manual run every one of these expressions is the empty string. Left
-        # unhandled, ``asv continuous`` quietly reads its one remaining
-        # argument as a revision and benchmarks it against its own parent,
-        # while ``asv compare`` exits 2 for want of a second revision -- which
-        # fails the job, so the caches never save and the comment workflow,
-        # gated on success, never runs.
+          BASE: ${{ steps.base.outputs.sha }}
+        # ``--bench just-discover`` is asv's own discovery-only mode
+        # (``commands/run.py``): it creates the environments, builds the project
+        # for the commit it discovers from, writes ``results/benchmarks.json``
+        # and returns 0 without running a benchmark. Done once here rather than
+        # once per shard, a cold cache costs one conda solve instead of four,
+        # and the shards restore an environment whose build cache already holds
+        # both commits' wheels. On a shared filesystem this is also what stops
+        # concurrent shards racing to install into one ``env/<hash>``; separate
+        # runners have no such race, but they do have the cost.
         run: |
           set -x
-          BASE="${{ github.event.pull_request.base.sha }}"
-          LABEL="${PR_HEAD_LABEL:-$GITHUB_REF_NAME}"
-          if [ -z "$BASE" ]; then
-            # The merge-base rather than the base branch's tip
-            BASE_REF="${{ github.event.inputs.base_ref }}"
-            BASE_REF="${BASE_REF:-main}"
-            git rev-parse --verify -q "origin/$BASE_REF" >/dev/null \
-              || git fetch -q origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
-            BASE=$(git merge-base "$GITHUB_SHA" "origin/$BASE_REF")
-          fi
-          if [ "$BASE" = "$(git rev-parse "$GITHUB_SHA")" ]; then
-            # Dispatched from main itself: compare it against the commit before.
-            BASE=$(git rev-parse "$GITHUB_SHA^")
-          fi
-          # Fail loudly rather than leaving asv to infer a baseline of its own.
-          test -n "$BASE" || { echo "could not determine a baseline commit" >&2; exit 1; }
           # Fill the fixture cache before asv preimports the suite, which would otherwise build it serially in the forkserver parent
           (cd .. && python -m benchmarks.helpers._fixtures)
-          # ID this runner, then rename the entry to the pinned name. Passing
-          # ``--machine`` to ``asv machine`` instead would record the name and
-          # nothing else: it stores only the fields that differ from the ones it
-          # detects, and skips filling the rest in, which would empty the cpu
-          # and num_cpu the step below reports. Detecting first and renaming
-          # after keeps the real os/arch/cpu/num_cpu/ram, so the results carry
-          # the hardware that actually ran.
           asv machine --yes
-          python - <<'PY'
-          import json, os, pathlib
+          (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
+          asv run --bench just-discover "${BASE}^!"
+          asv run --bench just-discover "${GITHUB_SHA}^!"
 
-          name = os.environ["ASV_MACHINE"]
-          path = pathlib.Path.home() / ".asv-machine.json"
-          stored = json.loads(path.read_text())
-          version = stored.pop("version")
-          # Exactly one entry, the one ``asv machine`` just wrote. Unpacked
-          # rather than indexed so a runner that arrives with a machine file
-          # already on it fails here instead of quietly keeping the other name.
-          (detected,) = stored.values()
-          detected["machine"] = name
-          path.write_text(json.dumps({name: detected, "version": version}, indent=4))
-          PY
-          echo "Baseline:  $BASE"
-          echo "Contender: ${GITHUB_SHA} ($LABEL)"
-          # Run benchmarks for current commit against base
-          ASV_OPTIONS="--split --show-stderr"
-          # ``-m`` is redundant while the machine file holds a single entry --
-          # asv falls back to it whatever its name -- and is passed anyway so
-          # the results stop depending on that fallback.
-          asv continuous $ASV_OPTIONS -m "$ASV_MACHINE" "$BASE" "${GITHUB_SHA}"
-          # Save compare results
-          asv compare --split --machine "$ASV_MACHINE" "$BASE" "${GITHUB_SHA}" > asv_compare_results.txt
+      - name: Plan the shards
+        id: plan
+        shell: bash -l {0}
         working-directory: ${{ env.ASV_DIR }}
+        env:
+          SHARDS: ${{ github.event.inputs.shards || '4' }}
+        run: |
+          set -x
+          # The report goes in the log so a lopsided split is visible without
+          # opening four shard jobs to find which one ran long.
+          PYTHONPATH=.. python -m benchmarks.helpers._partition --shards "$SHARDS"
+          echo "count=$SHARDS" >> "$GITHUB_OUTPUT"
+          python -c "import json, os; print('shards=' + json.dumps(list(range(int(os.environ['SHARDS'])))))" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Upload the discovered suite
+        uses: actions/upload-artifact@v7
+        with:
+          name: asv-plan
+          path: ${{ env.ASV_DIR }}/results/benchmarks.json
+
+  benchmark:
+    name: Shard ${{ matrix.shard }}
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      # Every shard is independent, and a shard that dies still leaves the rest
+      # worth merging.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.setup.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Conda environment
+        uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: ${{env.CONDA_ENV_FILE}}
+          cache-environment: true
+          environment-name: uxarray_build
+          cache-environment-key: "${{runner.os}}-${{runner.arch}}-${{hashFiles(env.CONDA_ENV_FILE)}}-benchmark"
+          create-args: >-
+            asv
+            python-build
+            mamba
+
+      - name: Cache asv's benchmark environment
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ASV_DIR }}/env
+          key: asv-env-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('benchmarks/asv.conf.json') }}
+          restore-keys: |
+            asv-env-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache the benchmark fixtures
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.ASV_DIR }}/oQU*.nc
+            ${{ env.ASV_DIR }}/_io_cache
+          key: asv-fixtures-${{ runner.os }}-${{ hashFiles('benchmarks/helpers/_fixtures.py') }}
+          restore-keys: |
+            asv-fixtures-${{ runner.os }}-
+
+      - name: Download the discovered suite
+        uses: actions/download-artifact@v8
+        with:
+          name: asv-plan
+          path: plan
+
+      - name: Run shard
+        shell: bash -l {0}
+        working-directory: ${{ env.ASV_DIR }}
+        env:
+          BASE: ${{ needs.setup.outputs.base }}
+          SHARDS: ${{ needs.setup.outputs.count }}
+          SHARD: ${{ matrix.shard }}
+        # Partitioned from setup's ``benchmarks.json`` rather than from whatever
+        # this runner's cache happens to hold, so every shard splits the same
+        # suite the same way. Nothing checks that the shards tile it: were they
+        # to disagree, benchmarks would simply go unrun and no step would say so.
+        run: |
+          set -x
+          (cd .. && python -m benchmarks.helpers._fixtures)
+          asv machine --yes
+          (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
+          ASV_ARGS=$(PYTHONPATH=.. python -m benchmarks.helpers._partition \
+            --shards "$SHARDS" --shard "$SHARD" --results ../plan \
+            --config asv.conf.json --asv-args)
+          echo "Baseline:  $BASE"
+          echo "Contender: ${GITHUB_SHA} (${PR_HEAD_LABEL:-$GITHUB_REF_NAME})"
+          asv continuous --split --show-stderr -m "$ASV_MACHINE" $ASV_ARGS \
+            "$BASE" "${GITHUB_SHA}"
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: asv-shard-${{ matrix.shard }}
+          path: ${{ env.ASV_DIR }}/results.shard${{ matrix.shard }}
+          if-no-files-found: warn
+
+  merge:
+    name: Merge and compare
+    needs: [setup, benchmark]
+    # Runs on a partial fan-out too: a merged tree missing one shard's rows is
+    # still worth reading, and the artifact is the only place a failed shard's
+    # half of the run can be seen.
+    if: ${{ always() && needs.setup.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Conda environment
+        uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: ${{env.CONDA_ENV_FILE}}
+          cache-environment: true
+          environment-name: uxarray_build
+          cache-environment-key: "${{runner.os}}-${{runner.arch}}-${{hashFiles(env.CONDA_ENV_FILE)}}-benchmark"
+          create-args: >-
+            asv
+            python-build
+            mamba
+
+      # Without merge-multiple each artifact lands in its own
+      # ``shards/asv-shard-N/``, which is what the merge needs: every shard
+      # named its results file identically, and telling them apart is the point.
+      - name: Download the shards
+        uses: actions/download-artifact@v8
+        with:
+          pattern: asv-shard-*
+          path: shards
+
+      - name: Merge and compare
+        shell: bash -l {0}
+        working-directory: ${{ env.ASV_DIR }}
+        env:
+          BASE: ${{ needs.setup.outputs.base }}
+        run: |
+          set -x
+          asv machine --yes
+          (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
+          (cd .. && python -m benchmarks.helpers._merge --out benchmarks/results shards/asv-shard-*)
+          asv compare --split --machine "$ASV_MACHINE" "$BASE" "${GITHUB_SHA}" \
+            > asv_compare_results.txt
+          cat asv_compare_results.txt
 
       # asv records a duration per benchmark, plus ``<build>`` and
       # ``<setup_cache ...>`` entries, in the results file it writes. Printing
-      # them is what tells us where a run's wall clock actually went.
+      # them is what tells us where a run's wall clock actually went. Two things
+      # to read them with: a per-benchmark duration is the final round's only,
+      # since asv assigns rather than accumulates it, and ``<build>`` and
+      # ``<setup_cache>`` are the slowest shard's, since every shard paid them.
       - name: Report where the time went
         if: always()
         shell: bash -l {0}
@@ -182,7 +328,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: asv-benchmark-results-${{ runner.os }}
+          name: asv-benchmark-results-Linux
           path: |
             ${{ env.ASV_DIR }}/results
             ${{ env.ASV_DIR }}/asv_compare_results.txt

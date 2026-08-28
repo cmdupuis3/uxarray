@@ -14,8 +14,15 @@ benchmarks, so a finer cut is available -- but measured durations say it is not
 needed. The suite is flat: the heaviest single benchmark is about 5% of the
 total, and greedy longest-first packing lands within ~1% of a perfect split
 even at eight shards. Splitting inside a benchmark would buy nothing and would
-put every shard's results in the same row of the same results file, which then
-has to be merged element-wise.
+put every shard's results in the same row of the same results file; keeping
+whole benchmarks leaves each row owned by one shard, so
+:mod:`benchmarks.helpers._merge` can put the tree back together by union.
+
+Shards still need somewhere separate to write, because asv names its results
+file per commit and environment rather than per run and rewrites the whole thing
+at the end of a set. ``--config-out`` emits a copy of the config with
+``results_dir`` pointed at this shard's own directory, which is what the merge
+then reads.
 
 Weights come from the ``duration`` asv records per benchmark in the results file
 it writes (``Results.save``), so a partition improves as results accumulate
@@ -26,7 +33,8 @@ than either zero or the mean of a long-tailed distribution.
 Usage::
 
     python -m benchmarks.helpers._partition --shards 4
-    python -m benchmarks.helpers._partition --shards 4 --shard 0 --bench-args
+    asv run $(python -m benchmarks.helpers._partition --shards 4 --shard 0 \
+        --config asv.conf.hpc.json --asv-args)
 """
 
 import argparse
@@ -37,7 +45,14 @@ import statistics
 import sys
 from pathlib import Path
 
-__all__ = ["load_benchmarks", "load_weights", "plan", "bench_regexes"]
+__all__ = [
+    "bench_regexes",
+    "load_benchmarks",
+    "load_weights",
+    "plan",
+    "shard_results_dir",
+    "write_shard_config",
+]
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 
@@ -146,6 +161,35 @@ def bench_regexes(names):
     return [f"^{re.escape(name)}($|\\()" for name in names]
 
 
+def shard_config_path(base_config, shard):
+    """Where shard ``shard``'s generated config goes, beside ``base_config``."""
+    base = Path(base_config)
+    return base.with_name(f"{base.stem}.shard{shard}{base.suffix}")
+
+
+def shard_results_dir(results_dir, shard):
+    """Where shard ``shard`` writes, given the run's ordinary ``results_dir``."""
+    return f"{results_dir}.shard{shard}"
+
+
+def write_shard_config(base_config, out_path, shard):
+    """Writes a copy of ``base_config`` that writes results where ``shard`` should.
+
+    Returns the shard's results directory.
+    """
+    # asv's loader, because an asv config is JSON with javascript comments and
+    # ``json`` cannot read one. Imported here so the rest of the module stays
+    # runnable without asv installed.
+    from asv import util
+
+    config = util.load_json(str(base_config), js_comments=True)
+    results_dir = shard_results_dir(config.get("results_dir", "results"), shard)
+    config["results_dir"] = results_dir
+    with open(out_path, "w") as handle:
+        json.dump(config, handle, indent=4)
+    return results_dir
+
+
 def _report(benchmarks, shards, weights):
     known = [value for value in weights.values() if value > 0]
     default = statistics.median(known) if known else 1.0
@@ -187,6 +231,22 @@ def main(argv=None):
         action="store_true",
         help="Print the shard's --bench arguments for asv, rather than a report.",
     )
+    parser.add_argument(
+        "--config",
+        default=str(BENCHMARK_DIR / "asv.conf.json"),
+        help="Base asv config for --config-out (default benchmarks/asv.conf.json).",
+    )
+    parser.add_argument(
+        "--config-out",
+        default=None,
+        help="Where --asv-args writes the shard config (default: beside --config).",
+    )
+    parser.add_argument(
+        "--asv-args",
+        action="store_true",
+        help="Write this shard's config and print every argument its asv run "
+        "needs, so launching a shard is one substitution. Needs --shard.",
+    )
     args = parser.parse_args(argv)
 
     results_dirs = args.results or [str(BENCHMARK_DIR / "results")]
@@ -194,9 +254,17 @@ def main(argv=None):
     weights = load_weights(results_dirs)
     shards = plan(benchmarks, args.shards, weights)
 
-    if args.bench_args:
+    if args.bench_args or args.asv_args:
         if args.shard is None:
-            parser.error("--bench-args needs --shard")
+            parser.error("--bench-args and --asv-args need --shard")
+        if args.asv_args:
+            # Written here rather than by a call of its own: a shard that is
+            # told which benchmarks to run has to be told where to put them,
+            # and splitting that across two commands is two chances to pass
+            # one shard's benchmarks with another's results directory.
+            config_out = args.config_out or shard_config_path(args.config, args.shard)
+            write_shard_config(args.config, config_out, args.shard)
+            print("--config", config_out)
         for pattern in bench_regexes(shards[args.shard]):
             print("--bench", pattern)
         return 0

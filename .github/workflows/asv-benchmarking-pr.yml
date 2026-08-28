@@ -78,6 +78,8 @@ jobs:
       - name: Run Benchmarks
         shell: bash -l {0}
         id: benchmark
+        env:
+          ASV_MACHINE: gh-${{ runner.os }}-${{ runner.arch }}
         # Only a pull_request event carries a pull_request payload, so on a
         # manual run every one of these expressions is the empty string. Left
         # unhandled, ``asv continuous`` quietly reads its one remaining
@@ -105,15 +107,38 @@ jobs:
           test -n "$BASE" || { echo "could not determine a baseline commit" >&2; exit 1; }
           # Fill the fixture cache before asv preimports the suite, which would otherwise build it serially in the forkserver parent
           (cd .. && python -m benchmarks.helpers._fixtures)
-          # ID this runner
+          # ID this runner, then rename the entry to the pinned name. Passing
+          # ``--machine`` to ``asv machine`` instead would record the name and
+          # nothing else: it stores only the fields that differ from the ones it
+          # detects, and skips filling the rest in, which would empty the cpu
+          # and num_cpu the step below reports. Detecting first and renaming
+          # after keeps the real os/arch/cpu/num_cpu/ram, so the results carry
+          # the hardware that actually ran.
           asv machine --yes
+          python - <<'PY'
+          import json, os, pathlib
+
+          name = os.environ["ASV_MACHINE"]
+          path = pathlib.Path.home() / ".asv-machine.json"
+          stored = json.loads(path.read_text())
+          version = stored.pop("version")
+          # Exactly one entry, the one ``asv machine`` just wrote. Unpacked
+          # rather than indexed so a runner that arrives with a machine file
+          # already on it fails here instead of quietly keeping the other name.
+          (detected,) = stored.values()
+          detected["machine"] = name
+          path.write_text(json.dumps({name: detected, "version": version}, indent=4))
+          PY
           echo "Baseline:  $BASE"
           echo "Contender: ${GITHUB_SHA} ($LABEL)"
           # Run benchmarks for current commit against base
           ASV_OPTIONS="--split --show-stderr"
-          asv continuous $ASV_OPTIONS "$BASE" "${GITHUB_SHA}"
+          # ``-m`` is redundant while the machine file holds a single entry --
+          # asv falls back to it whatever its name -- and is passed anyway so
+          # the results stop depending on that fallback.
+          asv continuous $ASV_OPTIONS -m "$ASV_MACHINE" "$BASE" "${GITHUB_SHA}"
           # Save compare results
-          asv compare --split "$BASE" "${GITHUB_SHA}" > asv_compare_results.txt
+          asv compare --split --machine "$ASV_MACHINE" "$BASE" "${GITHUB_SHA}" > asv_compare_results.txt
         working-directory: ${{ env.ASV_DIR }}
 
       # asv records a duration per benchmark, plus ``<build>`` and

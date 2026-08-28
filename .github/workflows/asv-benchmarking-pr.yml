@@ -40,8 +40,8 @@ jobs:
 
 
       - name: Record CPU topology
+        # A diagnostic; never fail the job over it.
         run: |
-          # A diagnostic; never fail the job over it.
           lscpu | grep -E 'Model name|^CPU\(s\):|Thread\(s\) per core|Core\(s\) per socket|Socket\(s\)|CPU max MHz' || lscpu || true
 
       - name: Set up Conda environment

@@ -14,11 +14,13 @@ Two flavors:
     everything the reader produced from ``Grid.open_grid`` and
     ``Grid.open_dataset``
 
-Artifacts are keyed on both the uxarray build and the files, because an
-artifact is one version's reader output and ASV diffs commits. Likewise, there's a
-fresh read per commit. ``prime`` covers every source that is readable here,
-and there is a CLI (``python -m benchmarks.helpers._fixtures``) to fill the
-cache from a batch script instead of from inside a benchmark.
+Artifacts are keyed on the source files and nothing else, so they persist
+across runs -- and across the commits ASV diffs, which means a benchmark on the
+cached flavors measures its own subject against one fixed reader output rather
+than against a per-commit re-read. A source replaced in place misses rather than
+being served something stale. ``prime`` covers every source that is readable
+here, and there is a CLI (``python -m benchmarks.helpers._fixtures``) to fill
+the cache from a batch script instead of from inside a benchmark.
 """
 
 import hashlib

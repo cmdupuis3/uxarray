@@ -72,7 +72,7 @@ jobs:
         # Only a pull_request event carries a pull_request payload, so on a
         # manual run every one of these expressions is the empty string.
         run: |
-          set -x
+          set -ex
           BASE="${{ github.event.pull_request.base.sha }}"
           if [ -z "$BASE" ]; then
             # The merge-base rather than the base branch's tip
@@ -124,7 +124,7 @@ jobs:
         # concurrent shards racing to install into one ``env/<hash>``; separate
         # runners have no such race, but they do have the cost.
         run: |
-          set -x
+          set -ex
           # Fill the fixture cache before asv preimports the suite, which would otherwise build it serially in the forkserver parent
           (cd .. && python -m benchmarks.helpers._fixtures)
           asv machine --yes
@@ -139,7 +139,7 @@ jobs:
         env:
           SHARDS: ${{ github.event.inputs.shards || '4' }}
         run: |
-          set -x
+          set -ex
           # The report goes in the log so a lopsided split is visible without
           # opening four shard jobs to find which one ran long.
           PYTHONPATH=.. python -m benchmarks.helpers._partition --shards "$SHARDS"
@@ -216,7 +216,7 @@ jobs:
         # suite the same way. Nothing checks that the shards tile it: were they
         # to disagree, benchmarks would simply go unrun and no step would say so.
         run: |
-          set -x
+          set -ex
           (cd .. && python -m benchmarks.helpers._fixtures)
           asv machine --yes
           (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
@@ -276,7 +276,7 @@ jobs:
         env:
           BASE: ${{ needs.setup.outputs.base }}
         run: |
-          set -x
+          set -ex
           asv machine --yes
           (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
           (cd .. && python -m benchmarks.helpers._merge --out benchmarks/results shards/asv-shard-*)

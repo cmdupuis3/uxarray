@@ -39,20 +39,28 @@ setup)
     # asv environments plus the wheel. Four shards building into one
     # ``env/<hash>`` concurrently is the race this stage exists to prevent.
     (cd .. && python -m benchmarks.helpers._fixtures)
-    asv machine --yes
+    asv machine --yes --config "$CONFIG"
     (cd .. && python -m benchmarks.helpers._machine --name "$ASV_MACHINE")
     # asv's own discovery-only mode: creates the environments, builds the
     # project, writes results/benchmarks.json, runs no benchmark. The four
     # NUMBA_NUM_THREADS environments share one build directory -- ``env_nobuild``
     # variables are omitted from the name ``dir_name`` hashes -- so this one
     # build serves all of them.
+    # ``--config`` on every asv call, and ``-m`` on every one after the pin.
+    # Without ``--config`` asv falls back to ``asv.conf.json`` in the working
+    # directory -- the CI config -- so this stage would discover, create the
+    # environment and build against a different matrix from the one the shards
+    # then run under. The two happen to share a ``req`` matrix, and so an
+    # environment directory, which is why it worked at all rather than failing;
+    # it just meant the pre-build was warming the wrong config's environment.
+    #
     # ``-m`` on every asv call from here on. The pin above renamed this host's
     # entry to $ASV_MACHINE, so the hostname asv would otherwise look itself up
     # under no longer exists in the machine file -- and once that file holds
     # more than one machine, asv's fall-back to a lone entry does not apply
     # either. Without it this fails with "No information stored about machine
     # '<hostname>'" immediately after the pin reports success.
-    asv run --bench just-discover -m "$ASV_MACHINE" "$REV"
+    asv run --bench just-discover --config "$CONFIG" -m "$ASV_MACHINE" "$REV"
     PYTHONPATH=.. python -m benchmarks.helpers._partition --shards "$SHARDS"
     ;;
 shard)
@@ -81,7 +89,7 @@ shard)
 merge)
     (cd .. && python -m benchmarks.helpers._merge \
         --out benchmarks/results benchmarks/results.shard*)
-    asv show -m "$ASV_MACHINE" || true
+    asv show --config "$CONFIG" -m "$ASV_MACHINE" || true
     ;;
 *)
     echo "unknown STAGE $STAGE" >&2

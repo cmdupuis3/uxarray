@@ -8,15 +8,23 @@ competing for the machine while it is measured. That points at one shard per
 runner rather than several per runner, and at this module, whose whole job is to
 decide which benchmarks each of those runners should claim.
 
-The split is by whole benchmark, not by parameter combination. asv matches
-``--bench`` against the expanded ``name(param0, param1)`` for parameterized
-benchmarks, so a finer cut is available -- but measured durations say it is not
-needed. The suite is flat: the heaviest single benchmark is about 5% of the
-total, and greedy longest-first packing lands within ~1% of a perfect split
-even at eight shards. Splitting inside a benchmark would buy nothing and would
-put every shard's results in the same row of the same results file; keeping
-whole benchmarks leaves each row owned by one shard, so
-:mod:`benchmarks.helpers._merge` can put the tree back together by union.
+The split is by whole class, not by benchmark and not by parameter
+combination. asv matches ``--bench`` against the expanded
+``name(param0, param1)``, so a much finer cut is available, but a class's
+benchmarks share the kernels its first one compiles and splitting them makes
+every shard pay that compile again. Measured: ``face_bounds.FaceBounds``'s four
+benchmarks cost ~59s together in one process, where ``time_face_bounds`` paid
+the bounds compile and the three ``track_*`` variants rode on it warm at under
+7s each; scattered one per shard across four runners they cost 221s, every one
+of them paying the compile alone. ``cache=True`` does not save this -- asv
+reinstalls the wheel for each commit and the on-disk cache goes with it. The
+suite stays flat enough at class granularity for greedy longest-first packing
+to land close to a perfect split.
+
+Going finer than a whole benchmark would also put two shards in one row of one
+results file, with no sane way to reconcile them. Whole benchmarks leave every
+row owned by exactly one shard, which is what lets
+:mod:`benchmarks.helpers._merge` rebuild the tree by union.
 
 Shards still need somewhere separate to write, because asv names its results
 file per commit and environment rather than per run and rewrites the whole thing
@@ -68,6 +76,58 @@ _SKIP_FILES = frozenset({"machine.json", "benchmarks.json"})
 def _splittable(setup_cache_key):
     """Whether benchmarks sharing this ``setup_cache_key`` may land in different shards."""
     return setup_cache_key is None or str(setup_cache_key).startswith(SPLITTABLE_PREFIX)
+
+
+def _owner(name):
+    """The class -- or the module, for a bare function -- a benchmark belongs to."""
+    return name.rsplit(".", 1)[0]
+
+
+def _units(benchmarks):
+    """Benchmarks that have to ride together, as ``{root name: [names]}``.
+
+    Two constraints, unioned so a ``setup_cache`` group spanning classes pulls
+    those classes together rather than contradicting them:
+
+    ``class``
+        Its benchmarks share whatever its first one compiles (see the module
+        docstring for what splitting one measured).
+    ``setup_cache``
+        Anything sharing a ``setup_cache`` expensive enough to matter, which asv
+        would otherwise run once in every shard holding a member.
+
+    Roots are the lexicographically smallest member, so the grouping is
+    deterministic and a shard can still work out its own membership.
+    """
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    groups = {}
+    for name, benchmark in benchmarks.items():
+        find(name)
+        groups.setdefault(("class", _owner(name)), []).append(name)
+        key = benchmark.get("setup_cache_key")
+        if not _splittable(key):
+            groups.setdefault(("setup_cache", key), []).append(name)
+    for members in groups.values():
+        for other in members[1:]:
+            union(members[0], other)
+
+    units = {}
+    for name in benchmarks:
+        units.setdefault(find(name), []).append(name)
+    return units
 
 
 def load_benchmarks(results_dir):
@@ -128,12 +188,7 @@ def plan(benchmarks, n_shards, weights=None):
     known = [value for value in weights.values() if value > 0]
     default = statistics.median(known) if known else 1.0
 
-    # Group anything sharing an expensive setup_cache, so it is paid once.
-    units = {}
-    for name, benchmark in benchmarks.items():
-        key = benchmark.get("setup_cache_key")
-        unit = name if _splittable(key) else f"setup_cache:{key}"
-        units.setdefault(unit, []).append(name)
+    units = _units(benchmarks)
 
     costs = {
         unit: sum(weights.get(name, default) for name in names)

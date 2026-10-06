@@ -1,7 +1,5 @@
 from asv_runner.benchmarks.mark import skip_benchmark_if, timeout_class_at
 
-import uxarray as ux
-
 from .helpers._fixtures import DYAMOND_AVAILABLE, DYAMOND_GRIDS, CachedFixtures
 
 # Paths, and the question of whether this machine can see them, both come from
@@ -21,16 +19,6 @@ class BaseGridBenchmark(CachedFixtures):
 
     def teardown(self, resolution, **kwargs):
         del self.uxgrid
-
-@timeout_class_at(1200)
-class OpenGrid:
-    param_names = ['resolution']
-    params = [list(DYAMOND_GRIDS), ]
-
-    @skip_benchmark_if(not DYAMOND_AVAILABLE)
-    def time_open_grid(self, resolution):
-        _ = ux.open_grid(grid_path_dict[resolution])
-
 
 @timeout_class_at(1200)
 class Bounds(BaseGridBenchmark):

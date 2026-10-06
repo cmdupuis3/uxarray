@@ -5,12 +5,14 @@ benchmark from that interpreter, so whatever a module prepares at import is
 inherited copy-on-write.
 """
 
+import contextlib
 import os
 import sys
 
 import numba
+from numba.core import event
 
-__all__ = ["warm_in_parent", "will_run_benchmarks"]
+__all__ = ["assert_numba_warm", "warm_in_parent", "will_run_benchmarks"]
 
 # ``benchmark.py <mode>``: asv runs discovery, setup_cache and check as their own processes
 _NON_RUNNING_MODES = frozenset({"discover", "setup_cache", "check"})
@@ -60,3 +62,44 @@ def warm_in_parent(warm, what):
         "the benchmark environment, or set NUMBA_THREADING_LAYER=forksafe.",
         file=sys.stderr,
     )
+
+
+@contextlib.contextmanager
+def assert_numba_warm():
+    """Raises if the block compiled a Numba kernel or loaded one off disk.
+
+    Either one charges the measurement for work a warm process never repeats, so
+    a benchmark wrapped in this fails rather than records a polluted number.
+
+    Watches ``numba:compiler_lock``, which numba takes for a disk-cache load as
+    well as a compile. ``numba:compile`` fires for a compile alone, and is
+    watched only for the names of whatever was compiled.
+    """
+    with event.install_recorder("numba:compiler_lock") as locked, \
+            event.install_recorder("numba:compile") as compiled:
+        yield
+    if not locked.buffer:
+        return
+
+    names = sorted({
+        _dispatcher_name(evt.data["dispatcher"])
+        for _, evt in compiled.buffer
+        if evt.is_start
+    })
+    what = (
+        f"compiled {', '.join(names)}"
+        if names
+        # A disk-cache hit leaves no event that names its dispatcher.
+        else "loaded kernels off its disk cache (NUMBA_DEBUG_CACHE=1 names them)"
+    )
+    raise RuntimeError(
+        f"numba {what} inside a measured block. Warm them in the parent with "
+        "warm_in_parent() so no forked benchmark pays for it."
+    )
+
+
+def _dispatcher_name(dispatcher):
+    py_func = getattr(dispatcher, "py_func", None)
+    if py_func is None:
+        return repr(dispatcher)
+    return f"{py_func.__module__}.{py_func.__qualname__}"
